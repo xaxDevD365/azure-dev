@@ -2,6 +2,7 @@ AADSTS
 ABRT
 ACCESSTOKEN
 Agentic
+agentmanifests
 aiomysql
 aiopg
 akvs
@@ -52,6 +53,7 @@ azfile
 azruntime
 azsdk
 azureai
+azureaiagent
 AZURECLI
 azurecodingagent
 azureedge
@@ -76,6 +78,7 @@ charmbracelet
 circleci
 cmdrecord
 cmdsubst
+Cobo
 cognitiveservices
 conditionalize
 consolesize
@@ -112,8 +115,10 @@ envlist
 envname
 envsubst
 errcheck
+Errorf
 errorinfo
 errorlint
+evals
 eventhub
 eventhubs
 executil
@@ -152,6 +157,7 @@ lechnerc77
 libc
 llms
 localtools
+maml
 mcptools
 memfs
 mergo
@@ -159,6 +165,7 @@ mgmt
 mgutz
 microsoftonline
 missingkey
+mmcp
 moby
 mockarmresources
 mockazcli

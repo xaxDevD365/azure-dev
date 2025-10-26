@@ -6,7 +6,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/azure/azure-dev/cli/azd/extensions/azure.foundry.ai.agents/internal/project"
+	"azureaiagent/internal/project"
+
 	"github.com/azure/azure-dev/cli/azd/pkg/azdext"
 	"github.com/spf13/cobra"
 )
@@ -26,9 +27,14 @@ func newListenCommand() *cobra.Command {
 			}
 			defer azdClient.Close()
 
-			provider := project.NewAgentServiceTargetProvider(azdClient)
+			projectParser := &project.FoundryParser{AzdClient: azdClient}
+			// IMPORTANT: service target name here must match the name used in the extension manifest.
 			host := azdext.NewExtensionHost(azdClient).
-				WithServiceTarget("foundry.agent", provider)
+				WithServiceTarget("foundry.containeragent", func() azdext.ServiceTargetProvider {
+					return project.NewAgentServiceTargetProvider(azdClient)
+				}).
+				WithProjectEventHandler("preprovision", projectParser.SetIdentity).
+				WithProjectEventHandler("postdeploy", projectParser.CoboPostDeploy)
 
 			// Start listening for events
 			// This is a blocking call and will not return until the server connection is closed.

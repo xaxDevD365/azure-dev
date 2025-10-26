@@ -13,14 +13,19 @@ import (
 )
 
 type serviceTargetRegistrar interface {
-	Register(ctx context.Context, provider ServiceTargetProvider, hostType string) error
+	Register(ctx context.Context, factory ServiceTargetFactory, hostType string) error
+	Close() error
+}
+
+type frameworkServiceRegistrar interface {
+	Register(ctx context.Context, factory FrameworkServiceFactory, language string) error
 	Close() error
 }
 
 type extensionEventManager interface {
 	AddProjectEventHandler(ctx context.Context, eventName string, handler ProjectEventHandler) error
 	AddServiceEventHandler(
-		ctx context.Context, eventName string, handler ServiceEventHandler, options *ServerEventOptions,
+		ctx context.Context, eventName string, handler ServiceEventHandler, options *ServiceEventOptions,
 	) error
 	Receive(ctx context.Context) error
 	Close() error
@@ -28,8 +33,14 @@ type extensionEventManager interface {
 
 // ServiceTargetRegistration describes a service target provider to register with azd core.
 type ServiceTargetRegistration struct {
-	Host     string
-	Provider ServiceTargetProvider
+	Host    string
+	Factory func() ServiceTargetProvider
+}
+
+// FrameworkServiceRegistration describes a framework service provider to register with azd core.
+type FrameworkServiceRegistration struct {
+	Language string
+	Factory  func() FrameworkServiceProvider
 }
 
 // ProjectEventRegistration describes a project-level event handler to register.
@@ -42,20 +53,31 @@ type ProjectEventRegistration struct {
 type ServiceEventRegistration struct {
 	EventName string
 	Handler   ServiceEventHandler
-	Options   *ServerEventOptions
+	Options   *ServiceEventOptions
 }
+
+// ProviderFactory describes a function that creates a provider instance
+type ProviderFactory[T any] func() T
+
+// ProviderFactory describes a function that creates an instance of a service target provider
+type ServiceTargetFactory ProviderFactory[ServiceTargetProvider]
+
+// FrameworkServiceFactory describes a function that creates an instance of a framework service provider
+type FrameworkServiceFactory ProviderFactory[FrameworkServiceProvider]
 
 // ExtensionHost coordinates registering service targets, wiring event handlers, and signaling readiness.
 type ExtensionHost struct {
 	client *AzdClient
 
-	serviceTargets  []ServiceTargetRegistration
-	projectHandlers []ProjectEventRegistration
-	serviceHandlers []ServiceEventRegistration
+	serviceTargets    []ServiceTargetRegistration
+	frameworkServices []FrameworkServiceRegistration
+	projectHandlers   []ProjectEventRegistration
+	serviceHandlers   []ServiceEventRegistration
 
-	newServiceTargetManager func(*AzdClient) serviceTargetRegistrar
-	newEventManager         func(*AzdClient) extensionEventManager
-	readyFn                 func(context.Context) error
+	newServiceTargetManager    func(*AzdClient) serviceTargetRegistrar
+	newFrameworkServiceManager func(*AzdClient) frameworkServiceRegistrar
+	newEventManager            func(*AzdClient) extensionEventManager
+	readyFn                    func(context.Context) error
 }
 
 // NewExtensionHost creates a new ExtensionHost for the supplied azd client.
@@ -64,6 +86,9 @@ func NewExtensionHost(client *AzdClient) *ExtensionHost {
 		client: client,
 		newServiceTargetManager: func(c *AzdClient) serviceTargetRegistrar {
 			return NewServiceTargetManager(c)
+		},
+		newFrameworkServiceManager: func(c *AzdClient) frameworkServiceRegistrar {
+			return NewFrameworkServiceManager(c)
 		},
 		newEventManager: func(c *AzdClient) extensionEventManager {
 			return NewEventManager(c)
@@ -75,8 +100,14 @@ func NewExtensionHost(client *AzdClient) *ExtensionHost {
 }
 
 // WithServiceTarget registers a service target provider to be wired when Run is invoked.
-func (er *ExtensionHost) WithServiceTarget(host string, provider ServiceTargetProvider) *ExtensionHost {
-	er.serviceTargets = append(er.serviceTargets, ServiceTargetRegistration{Host: host, Provider: provider})
+func (er *ExtensionHost) WithServiceTarget(host string, factory ServiceTargetFactory) *ExtensionHost {
+	er.serviceTargets = append(er.serviceTargets, ServiceTargetRegistration{Host: host, Factory: factory})
+	return er
+}
+
+// WithFrameworkService registers a framework service provider to be wired when Run is invoked.
+func (er *ExtensionHost) WithFrameworkService(language string, factory FrameworkServiceFactory) *ExtensionHost {
+	er.frameworkServices = append(er.frameworkServices, FrameworkServiceRegistration{Language: language, Factory: factory})
 	return er
 }
 
@@ -90,7 +121,7 @@ func (er *ExtensionHost) WithProjectEventHandler(eventName string, handler Proje
 func (er *ExtensionHost) WithServiceEventHandler(
 	eventName string,
 	handler ServiceEventHandler,
-	options *ServerEventOptions,
+	options *ServiceEventOptions,
 ) *ExtensionHost {
 	er.serviceHandlers = append(er.serviceHandlers, ServiceEventRegistration{
 		EventName: eventName,
@@ -103,14 +134,15 @@ func (er *ExtensionHost) WithServiceEventHandler(
 // Run wires the configured service targets and event handlers, signals readiness, and blocks until shutdown.
 func (er *ExtensionHost) Run(ctx context.Context) error {
 	var serviceManagers []serviceTargetRegistrar
+	var frameworkManagers []frameworkServiceRegistrar
 
 	for _, reg := range er.serviceTargets {
-		if reg.Provider == nil {
+		if reg.Factory == nil {
 			return fmt.Errorf("service target provider for host '%s' is nil", reg.Host)
 		}
 
 		manager := er.newServiceTargetManager(er.client)
-		if err := manager.Register(ctx, reg.Provider, reg.Host); err != nil {
+		if err := manager.Register(ctx, reg.Factory, reg.Host); err != nil {
 			_ = manager.Close()
 
 			for _, registered := range serviceManagers {
@@ -123,10 +155,40 @@ func (er *ExtensionHost) Run(ctx context.Context) error {
 		serviceManagers = append(serviceManagers, manager)
 	}
 
+	for _, reg := range er.frameworkServices {
+		if reg.Factory == nil {
+			return fmt.Errorf("framework service provider for language '%s' is nil", reg.Language)
+		}
+
+		manager := er.newFrameworkServiceManager(er.client)
+		if err := manager.Register(ctx, reg.Factory, reg.Language); err != nil {
+			_ = manager.Close()
+
+			for _, registered := range frameworkManagers {
+				_ = registered.Close()
+			}
+			for _, registered := range serviceManagers {
+				_ = registered.Close()
+			}
+
+			return fmt.Errorf("failed to register framework service '%s': %w", reg.Language, err)
+		}
+
+		frameworkManagers = append(frameworkManagers, manager)
+	}
+
 	if len(serviceManagers) > 0 {
 		defer func() {
 			for i := len(serviceManagers) - 1; i >= 0; i-- {
 				_ = serviceManagers[i].Close()
+			}
+		}()
+	}
+
+	if len(frameworkManagers) > 0 {
+		defer func() {
+			for i := len(frameworkManagers) - 1; i >= 0; i-- {
+				_ = frameworkManagers[i].Close()
 			}
 		}()
 	}
